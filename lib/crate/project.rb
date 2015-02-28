@@ -2,6 +2,7 @@ require 'rake'
 require 'rake/tasklib'
 require 'amalgalite'
 require 'amalgalite/requires'
+require 'base64'
 
 module Crate
   #
@@ -42,6 +43,10 @@ module Crate
     # The method on an instance of 'main_class' to invoke with ARGV, ENV
     # arguments to start the crate based program.
     attr_accessor :run_method
+
+    # Encryption key used for encypting/decrypting user scripts stored in
+    # sqlite database.
+    attr_accessor :script_encryption_key
 
     def initialize( name ) 
       raise "Crate Project already initialized" if ::Crate.project
@@ -113,7 +118,7 @@ module Crate
       unless @compile_params
         @compile_params = {}
         Dir.chdir( ::Crate.ruby.pkg_dir ) do
-          %w[ CC CFLAGS XCFLAGS LDFLAGS CPPFLAGS LIBS ].each do |p|
+          %w[ CC CFLAGS LDFLAGS CPPFLAGS LIBS ].each do |p|
             @compile_params[p] = %x( ./miniruby -I. -rrbconfig -e 'puts Config::CONFIG["#{p}"]' ).strip
           end
         end
@@ -145,7 +150,7 @@ CRATE_BOOT_H
     #
     def compile_crate_boot
       create_crate_boot_h
-      compile_options = %w[ CFLAGS XCFLAGS CPPFLAGS ].collect { |c| compile_params[c] }.join(' ')
+      compile_options = %w[ CFLAGS CPPFLAGS ].collect { |c| compile_params[c] }.join(' ')
       cmd = "#{compile_params['CC']} #{compile_options} -I#{Crate.ruby.pkg_dir} -o crate_boot.o -c crate_boot.c"
       logger.debug cmd
       sh cmd
@@ -156,13 +161,15 @@ CRATE_BOOT_H
     # Run the link command to create the final executable
     #
     def link_project
-      link_options = %w[ CFLAGS XCFLAGS LDFLAGS ].collect { |c| compile_params[c] }.join(' ')
+      link_options = %w[ CFLAGS LDFLAGS ].collect { |c| compile_params[c] }.join(' ')
       Dir.chdir( ::Crate.ruby.pkg_dir ) do
         dot_a = FileList[ "ext/**/*.a" ]
         dot_a << %w[ libssl.a libcrypto.a libz.a libruby-static.a  ] # order is important on the last 4
         dot_o = [ "ext/extinit.o", File.join( project_root, "crate_boot.o" )]
         libs = compile_params['LIBS']
         cmd = "#{compile_params['CC']} #{link_options} #{dot_o.join(' ')} #{libs} #{dot_a.join(' ')} -o #{File.join( dist_dir, name) }"
+        cmd += " /opt/local/i386-mingw32/lib/libgdi32.a" if compile_params['CC'] == "i386-mingw32-gcc"
+        cmd += " libxslt.a libexslt.a libxml2.a libiconv.a libz.a" # nokogiri's prerequisites
         logger.debug cmd
         sh cmd
       end
@@ -178,10 +185,17 @@ CRATE_BOOT_H
       packer_cmd = "amalgalite-pack"
 
       task :pack_ruby => dist_dir do
+        prefix = ::Crate.ruby.pkg_dir
+        
+        logger.info "Packing ruby rbconfig.rb into #{lib_db}"
+        cmd = "#{packer_cmd} --drop-table --db #{lib_db} --compress --strip-prefix #{prefix} #{File.join(prefix, 'rbconfig.rb')}"
+        logger.debug cmd
+        sh "#{cmd} > /dev/null"
+
         prefix = File.join( ::Crate.ruby.pkg_dir, "lib" )
         
         logger.info "Packing ruby standard lib into #{lib_db}"
-        cmd = "#{packer_cmd} --drop-table --db #{lib_db} --compress --strip-prefix #{prefix} #{prefix}" 
+        cmd = "#{packer_cmd} --merge --db #{lib_db} --compress --strip-prefix #{prefix} #{prefix}" 
         logger.debug cmd
         sh "#{cmd} > /dev/null"
        
@@ -219,10 +233,11 @@ CRATE_BOOT_H
       end
 
       task :pack_app => [ :pack_amalgalite, :pack_ruby, :pack_ruby_ext ] do
-        logger.info "Packing project packing lists lists into #{app_db}"
+        logger.info "Packing project packing lists into #{app_db}"
         Crate.project.packing_lists.each_with_index do |pl,idx|
           pc = ( idx == 0 ) ? "#{packer_cmd} --drop-table" : packer_cmd.dup
-          cmd = "#{pc} --db #{app_db} --merge --compress --strip-prefix #{pl.prefix} #{pl.file_list.join(' ')} "
+          ec = "--script-encryption-key #{Base64.encode64(script_encryption_key).gsub(/\n/, "*")}" if script_encryption_key
+          cmd = "#{pc} #{ec} --db #{app_db} --merge --compress --strip-prefix #{pl.prefix} #{pl.file_list.join(' ')} "
           logger.debug cmd
           sh "#{cmd} > /dev/null"
         end

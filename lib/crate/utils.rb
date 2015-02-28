@@ -25,7 +25,7 @@ module Crate
           ::Archive::Tar::Minitar.unpack( tgz, into )
         elsif archive.match( /\.gem\Z/ ) then
           subdir = File.basename( archive, ".gem" )
-          Gem::Installer.new( archive ).unpack( subdir )
+          Gem::Installer.new( archive, { :install_dir => File.join(into, subdir) }).unpack( subdir )
         else
           raise "Unable to extract files from #{File.basename( local_source)} -- unknown format"
         end
